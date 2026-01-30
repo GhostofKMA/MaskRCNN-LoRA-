@@ -34,10 +34,6 @@ def inject_lora_sam(model, r=8):
     for name, module in model.named_children():
         if name == "qkv" and isinstance(module, nn.Linear):
             lora_layer = LoRA_SAM_QKV(module, r=r)
-            return lora_layer 
+            setattr(model, name, lora_layer) 
         else:
-            new_module = inject_lora_sam(module, r=r)
-            if new_module is not None and name == "qkv": 
-                 setattr(model, name, new_module)
-            elif name != "qkv": 
-                 inject_lora_sam(module, r=r)
+            inject_lora_sam(module, r=r)
