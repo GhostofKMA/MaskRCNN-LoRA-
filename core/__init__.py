@@ -1,1 +1,1 @@
-from .backbone import EfficientSAMBackbone
+from .backbone import ViTHugeBackbone

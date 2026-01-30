@@ -1,5 +1,7 @@
 import torch
 import os
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*autocast.*")
 from detectron2.engine import DefaultTrainer, default_argument_parser, launch, default_setup
 import detectron2.data.transforms as T
 from detectron2.config import get_cfg
@@ -24,13 +26,21 @@ def setup(args):
     cfg.INPUT.CROP.ENABLED = False
     cfg.MODEL.DEVICE = "cuda"
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 10
-    cfg.MODEL.BACKBONE.CHECKPOINT = ""
+    cfg.MODEL.BACKBONE.CHECKPOINT = "weights/sam_vit_h_4b8939.pth"
     cfg.MODEL.BACKBONE.NAME = "ViTHugeBackbone"
-    cfg.MODEL.RPN.IN_FEATURES = ["p2", "p3", "p4", "p5"]
-    cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[32], [64], [128], [256]]
+    cfg.MODEL.RPN.IN_FEATURES = ["p2", "p3", "p4", "p5", "p6"]
+    cfg.MODEL.ANCHOR_GENERATOR.SIZES = [
+    [16, 32],       # P2 (Stride 4)
+    [64, 128],      # P3 (Stride 8)
+    [256, 512],     # P4 (Stride 16) 
+    [512, 1024],    # P5 (Stride 32) 
+    [1024, 2048]    # P6 (Stride 64) 
+]
+    cfg.MODEL.ROI_HEADS.IN_FEATURES = ["p2", "p3", "p4", "p5"]
+    cfg.MODEL.ANCHOR_GENERATOR.ASPECT_RATIOS = [[0.33, 0.5, 1.0, 2.0, 3.0]]
     cfg.MODEL.MASK_ON = True
     cfg.MODEL.KEYPOINT_ON = False
-    DATA_ROOT = "/home/hoangnv/MaskRCNN+EfficientSAM/data/UIIS10K/"
+    DATA_ROOT = "/data/bailab_data/hoangnv/UIIS10K/"
     register_coco_instances("uiis10k_train", 
                             {}, os.path.join(DATA_ROOT, "annotations/multiclass_train.json"), 
                             os.path.join(DATA_ROOT, "img"))
@@ -42,23 +52,27 @@ def setup(args):
     cfg.DATALOADER.NUM_WORKERS = 2
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     cfg.SOLVER.IMS_PER_BATCH  = 4
+    cfg.SOLVER.BASE_LR = 0.0001 
+    cfg.SOLVER.WEIGHT_DECAY = 0.05
+    cfg.SOLVER.WARMUP_ITERS = 5000
+    cfg.SOLVER.WARMUP_METHOD = "linear"
+    cfg.SOLVER.BIAS_LR_FACTOR = 1.0
+    cfg.SOLVER.WEIGHT_DECAY_BIAS = 0.0
+    cfg.SOLVER.LR_SCHEDULER_NAME = "WarmupMultiStepLR"
     dicts = DatasetCatalog.get("uiis10k_train")
     num_images = len(dicts)
     batch_size = cfg.SOLVER.IMS_PER_BATCH  
     one_epoch_iters = int(num_images / batch_size)
     cfg.SOLVER.MAX_ITER = one_epoch_iters * 24
-    cfg.SOLVER.STEPS = (one_epoch_iters * 14, one_epoch_iters * 20)
+    cfg.SOLVER.STEPS = (one_epoch_iters * 14, one_epoch_iters * 18)
     cfg.SOLVER.CHECKPOINT_PERIOD = one_epoch_iters 
     cfg.TEST.EVAL_PERIOD = one_epoch_iters
-    cfg.SOLVER.BASE_LR = 0.0001 
-    cfg.SOLVER.WEIGHT_DECAY = 0.1
-    cfg.SOLVER.WARMUP_ITERS = 2000 
     cfg.SOLVER.AMP.ENABLED = True
     cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE = "value"
     cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
     cfg.SOLVER.CLIP_GRADIENTS.NORM_TYPE = 2.0
-    cfg.OUTPUT_DIR = "./output/maskrcnn_vit_huge_lora"
+    cfg.OUTPUT_DIR = "/data1/bailab_checkpoint/output/maskrcnn_vit_huge_lora"
     cfg.freeze()
     default_setup(cfg, args)
     return cfg
@@ -72,15 +86,15 @@ class Trainer(DefaultTrainer):
         return COCOEvaluator(dataset_name, cfg, True, output_folder)
     @classmethod
     def build_train_loader(cls, cfg):
+        # Data augmentation for underwater UIIS10K dataset
         augs = [
+            T.RandomFlip(),  # Random flipping (horizontal)
             T.ResizeScale(
-                min_scale=0.5, max_scale=2.0, target_height=1024, target_width=1024
-            ),
-            T.FixedSizeCrop(crop_size=(1024, 1024), pad=True, pad_value=128.0),
-            T.RandomFlip(),
-            T.RandomBrightness(0.9, 1.1),
-            T.RandomContrast(0.9, 1.1),
-            T.RandomSaturation(0.9, 1.1),
+                min_scale=0.1, max_scale=2.0, target_height=1024, target_width=1024
+            ),  # Random scaling (adjusted for underwater objects)
+            T.FixedSizeCrop(crop_size=(1024, 1024), pad=True, pad_value=128.0), 
+            T.RandomBrightness(0.8, 1.2),  # Brightness adjustment for lighting variations
+            T.RandomContrast(0.8, 1.2),  # Contrast adjustment for underwater image clarity
         ]
         mapper = DatasetMapper(cfg, is_train=True, augmentations=augs, use_instance_mask=True, recompute_boxes=True)
         return build_detection_train_loader(cfg, mapper=mapper)
@@ -130,6 +144,7 @@ def main(args):
     return trainer.train()
 
 if __name__ == "__main__":
+
     args = default_argument_parser().parse_args()
     launch(
         main,
